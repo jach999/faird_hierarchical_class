@@ -8,16 +8,13 @@ Ensure your project folder looks exactly like this:
 ```
 project_root/
 ├── ClassificationClasses.csv    # [REQUIRED] Master taxonomy file
-├── faird_reclass.py       # Script 1: Cleaning & Reclassification
-├── tree_scheme.py         # Script 2: Visual Tree Generator
+├── faird_reclass.py             # Script 1: Cleaning & Reclassification
+├── tree_scheme.py               # Script 2: Visual Tree Generator
 ├── environment.yaml             # Conda environment config
 ├── source_tables/               # [INPUT] Place your raw Excel files here (.xlsx)
 ├── reclass/                     # [OUTPUT 1] Processed CSVs appear here
 └── scheme/                      # [OUTPUT 2] Final diagrams appear here
 ```
-
-text project_root/ ├── ClassificationClasses.csv # [REQUIRED] Master taxonomy authority (The Brain 🧠) ├── faird_reclass_final.py # Script 1: Cleaning & Reclassification logic ├── tree_scheme_fixed.py # Script 2: Visual Tree Generator ├── environment.yaml # Conda environment configuration ├── source_tables/ # [INPUT] Place your raw Excel files here (.xlsx) ├── reclass/ # [OUTPUT 1] Processed clean CSVs appear here └── scheme/ # [OUTPUT 2] Final visualization diagrams appear here
-
 
 ## 🧬 Master Taxonomy & Customization (Crucial!)
 
