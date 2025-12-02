@@ -65,9 +65,10 @@ def build_knowledge_base(ref_df):
         cols_ordered = TAXONOMIC_HIERARCHY[::-1]  # Class -> Family
         for col in cols_ordered:
             if col in ref_df.columns:
-                val = str(row[col]).strip()
-                if normalize_value(val) != "#n/c":
-                    full_path.append(val)
+                val = row[col]
+                # Check if value is valid BEFORE converting to string
+                if not pd.isna(val) and normalize_value(val) != "#n/c":
+                    full_path.append(str(val).strip())
 
         # Reverse for [Family, ..., Class] (Specific -> General)
         full_parents_reversed = full_path[::-1]
@@ -256,7 +257,15 @@ def process_excel_file(
 
             row_parents = {}
             for i in range(1, 7):
-                val = parents[i - 1] if i <= len(parents) else "#N/C"
+                if i <= len(parents):
+                    val = parents[i - 1]
+                    # Clean up any remaining string artifacts
+                    if pd.isna(val) or str(val).strip().lower() in ["nan", "", "#n/c"]:
+                        val = pd.NA  # Use pandas NA for proper missing data handling
+                    else:
+                        val = str(val).strip()
+                else:
+                    val = pd.NA  # Use pandas NA instead of string "#N/C"
                 row_parents[f"Parent folder {i}"] = val
             new_parents.append(row_parents)
 
