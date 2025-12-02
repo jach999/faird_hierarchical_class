@@ -1,7 +1,18 @@
 # --- CONFIGURATION ---
 # ...
-MASTER_FILE = "ClassificationClasses_long.csv"
-MASTER_LEAF_COL = "Leave"
+MASTER_FILE = "ClassificationClasses_simplified.csv"
+MASTER_LEAF_COL = "Leaf"
+
+# --- TREE VISUALIZATION OPTIONS ---
+# Collapse 1:1 parent-leaf relationships in the tree visualization
+# (does not modify CSV outputs, only affects the diagram)
+COLLAPSE_LEAF_ALIAS = True
+
+# Label format when collapsing (only used if COLLAPSE_LEAF_ALIAS = True)
+# Options: "taxonomic_common" or "common_taxonomic"
+# Examples: "Orthoptera (grasshopper)" or "grasshopper (Orthoptera)"
+LABEL_FORMAT = "common_taxonomic"
+
 
 # Extract version suffix from master file name
 # Example: "ClassificationClasses_long.csv" -> "long"
