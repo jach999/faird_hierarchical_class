@@ -51,12 +51,19 @@ Edit `config.py` to specify your settings:
 MASTER_FILE = "ClassificationClasses_long.csv"
 MASTER_LEAF_COL = "Leave"
 
+# Reclassification options
+DELETE_UNCLASSIFIED_ROWS = True         # Auto-delete rows that can't be classified
+
 # Tree visualization options
 COLLAPSE_LEAF_ALIAS = True              # Collapse 1:1 parent-leaf relationships
 LABEL_FORMAT = "common_taxonomic"       # Label format for collapsed nodes
 ```
 
 **Version suffix** (e.g., `_long`) is automatically extracted from the master file name and applied to all outputs.
+
+**Reclassification settings:**
+- `DELETE_UNCLASSIFIED_ROWS = True`: Automatically removes rows that cannot be classified (recommended for production)
+- `DELETE_UNCLASSIFIED_ROWS = False`: Keeps unclassified rows for debugging and data quality review
 
 **Collapse settings:**
 - `COLLAPSE_LEAF_ALIAS = True`: Merges redundant 1:1 relationships in the tree visualization (e.g., `Syrphidae → hoverfly` becomes `hoverfly (Syrphidae)`)
@@ -79,10 +86,12 @@ python faird_reclass.py
 - Handles manual assignments (if "Manual assignment" column exists)
 - Generates cleaned CSV files in `reclass/` with the format: `filename_[version].csv`
 
-**Interactive prompt:**
-If unclassified rows are found (marked as `#N/C`), you'll be asked whether to remove them:
-- `y`: Remove unclassified rows (recommended for production)
-- `n`: Keep them for debugging
+**Handling unclassified rows:**
+The `DELETE_UNCLASSIFIED_ROWS` setting in `config.py` controls automatic behavior when rows cannot be classified (marked as `#N/C`):
+- `True`: Automatically removes unclassified rows (recommended for production)
+- `False`: Keeps unclassified rows in output for debugging and data quality review
+
+The script will report how many rows were deleted or kept based on your configuration.
 
 ### Step 2: Generate Visualization
 

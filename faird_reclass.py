@@ -277,19 +277,22 @@ def process_excel_file(
         if count_unclassified > 0:
             print(f"\n  {'!' * 40}")
             print(f"  [RESULT] Found {count_unclassified} unclassified rows (#N/C).")
-            while True:
-                user_response = (
-                    input(f"  >> DELETE these rows? (y/n): ").strip().lower()
+
+            # Use config setting instead of interactive input
+            if config.DELETE_UNCLASSIFIED_ROWS:
+                df_final = df[~unclassified_mask]
+                print(
+                    f"  [AUTO] Deleted {count_unclassified} unclassified rows (config: DELETE_UNCLASSIFIED_ROWS = True)"
                 )
-                if user_response == "y":
-                    df_final = df[~unclassified_mask]
-                    break
-                elif user_response == "n":
-                    break
+            else:
+                print(
+                    f"  [AUTO] Kept {count_unclassified} unclassified rows (config: DELETE_UNCLASSIFIED_ROWS = False)"
+                )
         else:
             print(f"  [OK] All rows classified successfully.")
 
         if df_final.empty:
+            print(f"  [WARNING] No rows remaining after filtering. Skipping file.")
             return False
 
         # --- SAVE OUTPUT ---

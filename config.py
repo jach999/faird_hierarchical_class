@@ -1,7 +1,13 @@
 # --- CONFIGURATION ---
 # ...
-MASTER_FILE = "ClassificationClasses_simplified.csv"
+MASTER_FILE = "ClassificationClasses_old.csv"
 MASTER_LEAF_COL = "Leaf"
+
+# --- RECLASSIFICATION OPTIONS ---
+# Automatically delete rows that cannot be classified (#N/C)
+# True: Remove unclassified rows automatically
+# False: Keep unclassified rows in output
+DELETE_UNCLASSIFIED_ROWS = True
 
 # --- TREE VISUALIZATION OPTIONS ---
 # Collapse 1:1 parent-leaf relationships in the tree visualization

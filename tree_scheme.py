@@ -183,6 +183,84 @@ def generate_graph(df: pd.DataFrame, output_path: Path, true_leaves: set):
                 # OPTIONAL: If you want n=X to represent flow through parents too:
                 # node_counts[parent] += 1
 
+    # 2.5. Collapse 1:1 parent-leaf relationships if enabled
+    collapsed_nodes = {}  # Maps: parent -> combined_node_name
+    collapsed_edges = set(edges)  # Start with original edges
+
+    if config.COLLAPSE_LEAF_ALIAS:
+        print(f"[INFO] Detecting and collapsing 1:1 parent-leaf relationships...")
+
+        # Count children for each parent
+        parent_children = {}
+        for parent, child in edges:
+            if parent not in parent_children:
+                parent_children[parent] = []
+            parent_children[parent].append(child)
+
+        # Count parents for each child (detect convergence)
+        child_parents = {}
+        for parent, child in edges:
+            if child not in child_parents:
+                child_parents[child] = []
+            child_parents[child].append(parent)
+
+        # Detect 1:1 relationships (parent has exactly 1 child AND child is a leaf)
+        # BUT: Don't collapse if multiple parents converge to the same child
+        for parent, children in parent_children.items():
+            if len(children) == 1:
+                child = children[0]
+                # Check if this child is a leaf (true leaf from master file)
+                if child in true_leaves:
+                    # Check if this child has multiple parents (convergence)
+                    num_parents = len(child_parents.get(child, []))
+
+                    if num_parents > 1:
+                        # Multiple parents converge to this leaf - DON'T collapse
+                        print(
+                            f"  - Skipping: {parent} → {child} (converges with {num_parents - 1} other parent(s))"
+                        )
+                        continue
+
+                    # This is a true 1:1 alias relationship - safe to collapse
+                    # Create combined label
+                    if config.LABEL_FORMAT == "taxonomic_common":
+                        combined_label = f"{parent} ({child})"
+                    else:  # common_taxonomic
+                        combined_label = f"{child} ({parent})"
+
+                    collapsed_nodes[parent] = combined_label
+                    collapsed_nodes[child] = combined_label
+
+                    print(f"  - Collapsing: {parent} → {child} => {combined_label}")
+
+        # Rebuild edges, skipping collapsed nodes
+        new_edges = set()
+        for parent, child in edges:
+            # Check if either node is being collapsed
+            if parent in collapsed_nodes and child in collapsed_nodes:
+                # Both are part of the same collapsed pair - skip this edge
+                continue
+            elif parent in collapsed_nodes:
+                # Parent is collapsed - use combined node
+                new_edges.add((collapsed_nodes[parent], child))
+            elif child in collapsed_nodes:
+                # Child is collapsed - connect parent to combined node
+                new_edges.add((parent, collapsed_nodes[child]))
+            else:
+                # Neither collapsed - keep original edge
+                new_edges.add((parent, child))
+
+        collapsed_edges = new_edges
+
+        # Update all_encountered_nodes
+        # Remove individual nodes that were collapsed and add combined nodes
+        collapsed_set = set(collapsed_nodes.keys())
+        all_encountered_nodes = (all_encountered_nodes - collapsed_set) | set(
+            collapsed_nodes.values()
+        )
+
+        print(f"  Collapsed {len(collapsed_nodes) // 2} node pairs")
+
     # 3. Initialize Graph
     dot = graphviz.Digraph(comment="Taxonomy Tree")
     dot.attr(rankdir="LR")  # Left to Right orientation
@@ -193,28 +271,22 @@ def generate_graph(df: pd.DataFrame, output_path: Path, true_leaves: set):
 
     # 4. Add Nodes with Coloring Logic
     for node in all_encountered_nodes:
-        # Get count (default to 0 if it's purely a parent folder with no direct classifications)
-        # Note: If you want to count flow through parents, the counting logic above needs adjusting.
-        # Currently, n=X shows how many images were classified EXACTLY as this node.
+        # Check if this is a collapsed combined node
+        is_collapsed = (
+            node in collapsed_nodes.values() if config.COLLAPSE_LEAF_ALIAS else False
+        )
 
-        # Recalculate 'flow' count (how many times this node appears in any path)
-        # This is usually more useful for the tree view
-        flow_count = 0
-        # This is expensive (O(N*M)), but fine for moderate datasets.
-        # For huge datasets, optimize the counting loop above.
-        # Let's do a quick estimation based on the edges:
-        # Actually, simpler: Use the Counter logic if we uncommented the parent count above.
-        # For now, let's stick to the simple count or re-iterate if needed.
-        # Let's just use the count of times it was a 'destination'.
+        # For collapsed nodes, sum counts from both original nodes
+        if is_collapsed and config.COLLAPSE_LEAF_ALIAS:
+            # Find the original nodes that were collapsed into this one
+            original_nodes = [k for k, v in collapsed_nodes.items() if v == node]
+            count = sum(node_counts.get(orig, 0) for orig in original_nodes)
+        else:
+            count = node_counts.get(node, 0)
 
-        # BETTER COUNTING LOGIC (Flow):
-        # Let's count how many total paths contain this node
-        # (Re-doing a quick pass for accurate N numbers on folders)
-        count = 0
-
-        # --- COLOR LOGIC (The Fix) ---
-        # Only color yellow if the node is in the MASTER TRUE LEAVES list
-        if node in true_leaves:
+        # --- COLOR LOGIC ---
+        # Collapsed nodes or true leaves get yellow color
+        if is_collapsed or node in true_leaves:
             fill_color = "#FFFF99"  # Light Yellow
             shape = "note"  # Use 'note' shape for files/leaves
         else:
@@ -222,19 +294,15 @@ def generate_graph(df: pd.DataFrame, output_path: Path, true_leaves: set):
             shape = "folder"  # Use 'folder' shape for categories
 
         # Label
-        # We will use a simple counter for now.
-        # If the count is 0 in node_counts, it means it's a parent folder that never appears as a leaf.
-        # We can try to sum up its children counts if needed, but Graphviz doesn't need strictly accurate numbers to work.
-
         label_text = clean_label(node)
         # Optional: Add count if > 0
-        if node_counts[node] > 0:
-            label_text += f"\n(n={node_counts[node]})"
+        if count > 0:
+            label_text += f"\n(n={count})"
 
         dot.node(node, label=label_text, fillcolor=fill_color, shape=shape)
 
     # 5. Add Edges
-    for parent, child in edges:
+    for parent, child in collapsed_edges:  # Use collapsed_edges instead of edges
         dot.edge(parent, child, color="#555555")
 
     # 6. Save
