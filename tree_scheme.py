@@ -7,10 +7,10 @@ import config
 
 # --- CONFIGURATION ---
 HOME = os.path.dirname(__file__)
-INPUT_FOLDER = "reclass"
-OUTPUT_FOLDER = "scheme"
-OUTPUT_FILENAME = "taxonomy_tree"
-MASTER_FILE = "ClassificationClasses.csv"  # The authority on what is a true leaf
+INPUT_FOLDER = "reclass"  # Read from versioned files
+OUTPUT_FOLDER = "scheme"  # Save versioned file
+OUTPUT_FILENAME = f"taxonomy_tree_{config.VERSION_SUFFIX}"  # Versioned output file
+MASTER_FILE = config.MASTER_FILE  # The authority on what is a true leaf
 
 # Define the Leaf Column name in the input files
 LEAF_COLUMN = "Classification class refined"
@@ -82,7 +82,14 @@ def load_and_combine_data(input_path: Path) -> pd.DataFrame:
     Iterates through all CSV files in the input folder and combines them
     into a single DataFrame.
     """
-    all_files = sorted([f for f in input_path.glob("*.csv")])
+    # Only load CSV files that match the current version suffix
+    all_files = sorted(
+        [
+            f
+            for f in input_path.glob("*.csv")
+            if f.stem.endswith(f"_{config.VERSION_SUFFIX}")
+        ]
+    )
 
     if not all_files:
         print(f"[WARNING] No CSV files found in '{input_path.name}' folder.")

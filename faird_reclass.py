@@ -6,7 +6,7 @@ import config
 
 # --- CONFIGURATION ---
 HOME = os.path.dirname(__file__)
-MASTER_FILE = "ClassificationClasses.csv"
+MASTER_FILE = config.MASTER_FILE  # Use from config.py
 TARGET_SHEET = "Monitoring"
 MANUAL_COL_NAME = "Manual assignment"
 
@@ -297,7 +297,9 @@ def process_excel_file(
         output_dir = Path(HOME) / OUTPUT_FOLDER_NAME
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        output_name = output_dir / file_path.with_suffix(".csv").name
+        # Add version suffix to the output filename
+        base_name = file_path.stem  # filename without extension
+        output_name = output_dir / f"{base_name}_{config.VERSION_SUFFIX}.csv"
 
         df_final.to_csv(output_name, index=False, sep=";", encoding="utf-8-sig")
         print(f"  [SUCCESS] Saved to: {output_name}")
