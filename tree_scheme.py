@@ -13,9 +13,7 @@ OUTPUT_FILENAME = f"taxonomy_tree_{config.VERSION_SUFFIX}"  # Versioned output f
 MASTER_FILE = config.MASTER_FILE  # The authority on what is a true leaf
 
 # Define the Leaf Column name in the input files
-LEAF_COLUMN = "Classification class refined"
-# Define the prefix to detect parent columns dynamically
-PARENT_PREFIX = "Parent folder"
+LEAF_COLUMN = "Leaf_reclass"
 
 
 def is_valid_node(val) -> bool:
@@ -116,32 +114,49 @@ def load_and_combine_data(input_path: Path) -> pd.DataFrame:
     return combined_df
 
 
-def generate_graph(df: pd.DataFrame, output_path: Path, true_leaves: set):
+def generate_graph(
+    df: pd.DataFrame,
+    output_path: Path,
+    true_leaves: set,
+    mode: str = "endpoint",
+    suffix: str = "",
+):
     """
     Generates the Graphviz tree from the DataFrame.
+
+    Args:
+        mode: "endpoint" (counts only final classifications) or "cumulative" (counts all flow-through)
+        suffix: suffix to add to output filename (e.g., "_cml")
     """
-    print(f"\n[INFO] Generating graph structure...")
+    print(f"\n[INFO] Generating graph structure ({mode} mode)...")
 
-    # 1. Identify Parent Columns dynamically
-    parent_cols = [c for c in df.columns if PARENT_PREFIX.lower() in c.lower()]
+    # Define hierarchy columns (General -> Specific)
+    hierarchy_cols = [
+        "Class_reclass",
+        "Order_reclass",
+        "Suborder_reclass",
+        "Infraorder_reclass",
+        "Superfamily_reclass",
+        "Family_reclass",
+    ]
 
-    # Sort them descending (Parent 6 -> Parent 1)
-    try:
-        parent_cols.sort(
-            key=lambda x: int("".join(filter(str.isdigit, x))), reverse=True
-        )
-    except:
-        print("[ERROR] Could not sort parent columns numerically. Check column names.")
+    # Verify columns exist
+    missing_cols = [col for col in hierarchy_cols if col not in df.columns]
+    if missing_cols:
+        print(f"[ERROR] Missing hierarchy columns: {missing_cols}")
         return
-
-    print(f"  Detected hierarchy columns (General -> Specific): {parent_cols}")
 
     if LEAF_COLUMN not in df.columns:
         print(f"[ERROR] Leaf column '{LEAF_COLUMN}' not found in data.")
         return
 
+    print(
+        f"  Using fixed hierarchy: Class → Order → Suborder → Infraorder → Superfamily → Family → Leaf"
+    )
+
     # 2. Build Paths and Count Occurrences
     node_counts = Counter()
+    node_cumulative_counts = Counter()  # NEW: For cumulative version
     edges = set()
 
     # We maintain a set of ALL nodes encountered to iterate later
@@ -151,15 +166,15 @@ def generate_graph(df: pd.DataFrame, output_path: Path, true_leaves: set):
         # Construct the path for this row
         path_nodes = []
 
-        # Add Parents
-        for col in parent_cols:
+        # Add taxonomy levels from general to specific (Class -> Family)
+        for col in hierarchy_cols:
             val = row[col]
             if is_valid_node(val):
                 clean_val = str(val).strip()
                 path_nodes.append(clean_val)
                 all_encountered_nodes.add(clean_val)
 
-        # Add Leaf (Refined Class)
+        # Add Leaf (most specific classification)
         leaf_val = row[LEAF_COLUMN]
         if is_valid_node(leaf_val):
             clean_leaf = str(leaf_val).strip()
@@ -168,11 +183,13 @@ def generate_graph(df: pd.DataFrame, output_path: Path, true_leaves: set):
 
         # Update Counts and Edges
         if path_nodes:
-            # We count specifically the ENDPOINT of this row
+            # ENDPOINT COUNT: Only count the final node
             endpoint = path_nodes[-1]
-            node_counts[endpoint] += (
-                1  # Count appearances as an endpoint (classification)
-            )
+            node_counts[endpoint] += 1
+
+            # CUMULATIVE COUNT: Count all nodes in path (flow-through)
+            for node in path_nodes:
+                node_cumulative_counts[node] += 1
 
             # Create edges: Node i -> Node i+1
             for i in range(len(path_nodes) - 1):
@@ -269,8 +286,8 @@ def generate_graph(df: pd.DataFrame, output_path: Path, true_leaves: set):
         "node", shape="folder", style="filled", fontname="Arial", fillcolor="white"
     )
 
-    # 4. Add Nodes with Coloring Logic
-    for node in all_encountered_nodes:
+    # 4. Add Nodes with Coloring Logic (SORTED for deterministic layout)
+    for node in sorted(all_encountered_nodes):
         # Check if this is a collapsed combined node
         is_collapsed = (
             node in collapsed_nodes.values() if config.COLLAPSE_LEAF_ALIAS else False
@@ -280,9 +297,17 @@ def generate_graph(df: pd.DataFrame, output_path: Path, true_leaves: set):
         if is_collapsed and config.COLLAPSE_LEAF_ALIAS:
             # Find the original nodes that were collapsed into this one
             original_nodes = [k for k, v in collapsed_nodes.items() if v == node]
-            count = sum(node_counts.get(orig, 0) for orig in original_nodes)
+            if mode == "cumulative":
+                count = sum(
+                    node_cumulative_counts.get(orig, 0) for orig in original_nodes
+                )
+            else:
+                count = sum(node_counts.get(orig, 0) for orig in original_nodes)
         else:
-            count = node_counts.get(node, 0)
+            if mode == "cumulative":
+                count = node_cumulative_counts.get(node, 0)
+            else:
+                count = node_counts.get(node, 0)
 
         # --- COLOR LOGIC ---
         # Collapsed nodes or true leaves get yellow color
@@ -301,12 +326,14 @@ def generate_graph(df: pd.DataFrame, output_path: Path, true_leaves: set):
 
         dot.node(node, label=label_text, fillcolor=fill_color, shape=shape)
 
-    # 5. Add Edges
-    for parent, child in collapsed_edges:  # Use collapsed_edges instead of edges
+    # 5. Add Edges (SORTED for deterministic layout)
+    for parent, child in sorted(
+        collapsed_edges
+    ):  # Use collapsed_edges instead of edges
         dot.edge(parent, child, color="#555555")
 
     # 6. Save
-    output_file = output_path / OUTPUT_FILENAME
+    output_file = output_path / f"{OUTPUT_FILENAME}{suffix}"
     print(f"[INFO] Rendering to {output_file}.png...")
 
     try:
@@ -347,8 +374,16 @@ def main():
         print("[ERROR] No data found to process. Exiting.")
         return
 
-    # 3. Generate Graph
-    generate_graph(df, output_path, true_leaves)
+    # 3. Generate Graphs (both versions)
+    print("\n" + "=" * 60)
+    print("GENERATING ENDPOINT VERSION (counts only final classifications)")
+    print("=" * 60)
+    generate_graph(df, output_path, true_leaves, mode="endpoint", suffix="")
+
+    print("\n" + "=" * 60)
+    print("GENERATING CUMULATIVE VERSION (counts all flow-through)")
+    print("=" * 60)
+    generate_graph(df, output_path, true_leaves, mode="cumulative", suffix="_cml")
 
 
 if __name__ == "__main__":

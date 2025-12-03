@@ -1,20 +1,16 @@
 import pandas as pd
 from pathlib import Path
 import os
-import sys
 import config
 
 # --- CONFIGURATION ---
 HOME = os.path.dirname(__file__)
-MASTER_FILE = config.MASTER_FILE  # Use from config.py
+MASTER_FILE = config.MASTER_FILE
 TARGET_SHEET = "Monitoring"
 MANUAL_COL_NAME = "Manual assignment"
+INPUT_FOLDER_NAME = "source_tables"
+OUTPUT_FOLDER_NAME = "reclass"
 
-# Folder Configuration
-INPUT_FOLDER_NAME = "source_tables"  # Where raw Excels are located
-OUTPUT_FOLDER_NAME = "reclass"  # Where processed CSVs will be saved
-
-# Strict order: From most specific (Family) to most general (Class)
 TAXONOMIC_HIERARCHY = [
     "Family",
     "Superfamily",
@@ -25,57 +21,45 @@ TAXONOMIC_HIERARCHY = [
 ]
 
 
-def normalize_value(val: any) -> str:
-    """
-    Standardizes text values: lowercase, removes extra spaces/newlines.
-    Returns '#n/c' for empty/null values.
-    """
+def normalize_value(val) -> str:
     if pd.isna(val) or str(val).strip() == "" or str(val).strip().lower() == "#n/c":
         return "#n/c"
     return str(val).strip().replace("\xa0", " ").replace("\n", "").lower()
 
 
 def build_knowledge_base(ref_df):
-    """
-    Builds the classification rules indexed by their 'Definition Level'.
-    Also builds lookup maps for manual assignment and taxonomic lineage.
-    """
     rules_by_level = {level.lower(): {} for level in TAXONOMIC_HIERARCHY}
     class_lookup = {}
     taxon_lineage_map = {}
-
-    print(f"  [INFO] Building knowledge base (Bottom-Up Logic)...")
+    print(f"  [INFO] Building knowledge base (deepest_level indexing)...")
 
     for _, row in ref_df.iterrows():
-        # 1. Determine the deepest level defined in this rule
         deepest_level = None
         deepest_value = None
-
         for level in TAXONOMIC_HIERARCHY:
-            col_name = level
-            if col_name in ref_df.columns:
-                val = normalize_value(row[col_name])
+            if level in ref_df.columns:
+                val = normalize_value(row[level])
                 if val != "#n/c":
                     deepest_level = level.lower()
                     deepest_value = val
                     break
 
-        # Build full parent path
-        full_path = []
-        cols_ordered = TAXONOMIC_HIERARCHY[::-1]  # Class -> Family
-        for col in cols_ordered:
+        parent_dict = {}
+        for col in TAXONOMIC_HIERARCHY[::-1]:
             if col in ref_df.columns:
                 val = row[col]
-                # Check if value is valid BEFORE converting to string
                 if not pd.isna(val) and normalize_value(val) != "#n/c":
-                    full_path.append(str(val).strip())
+                    parent_dict[col] = str(val).strip()
+                else:
+                    parent_dict[col] = None
 
-        # Reverse for [Family, ..., Class] (Specific -> General)
+        full_path = [v for v in parent_dict.values() if v is not None]
         full_parents_reversed = full_path[::-1]
 
         rule_obj = {
             "result_class": row[config.MASTER_LEAF_COL],
             "parents": full_parents_reversed,
+            "parent_dict": parent_dict,
         }
 
         if deepest_level and deepest_value:
@@ -83,7 +67,7 @@ def build_knowledge_base(ref_df):
 
         cls_key = normalize_value(row[config.MASTER_LEAF_COL])
         if cls_key != "#n/c":
-            class_lookup[cls_key] = full_parents_reversed
+            class_lookup[cls_key] = {"list": full_parents_reversed, "dict": parent_dict}
 
         for i, taxon in enumerate(full_path):
             taxon_key = normalize_value(taxon)
@@ -96,10 +80,6 @@ def build_knowledge_base(ref_df):
 
 
 def find_best_match_bottom_up(row, rules_by_level, taxonomic_map):
-    """
-    Searches for matches starting from Family up to Class.
-    If a match is found at a specific level, it returns that rule immediately.
-    """
     for level in TAXONOMIC_HIERARCHY:
         level_key = level.lower()
         excel_col = None
@@ -107,7 +87,6 @@ def find_best_match_bottom_up(row, rules_by_level, taxonomic_map):
             if col_std.lower() == level_key:
                 excel_col = col_orig
                 break
-
         if excel_col and excel_col in row:
             val_in_row = normalize_value(row[excel_col])
             if val_in_row != "#n/c":
@@ -117,9 +96,6 @@ def find_best_match_bottom_up(row, rules_by_level, taxonomic_map):
 
 
 def find_taxonomic_fallback(row, taxonomic_map, taxon_lineage_map):
-    """
-    Fallback: Finds the deepest valid taxonomic anchor known in the lineage map.
-    """
     for level in TAXONOMIC_HIERARCHY:
         level_key = level.lower()
         col_name_in_excel = None
@@ -127,70 +103,52 @@ def find_taxonomic_fallback(row, taxonomic_map, taxon_lineage_map):
             if col_std.lower() == level_key:
                 col_name_in_excel = col_orig
                 break
-
         if col_name_in_excel and col_name_in_excel in row:
             val = row[col_name_in_excel]
             val_norm = normalize_value(val)
             if val_norm != "#n/c" and val_norm in taxon_lineage_map:
+                parent_dict = {}
+                for tax_level in TAXONOMIC_HIERARCHY:
+                    excel_col = None
+                    for col_orig, col_std in taxonomic_map.items():
+                        if col_std.lower() == tax_level.lower():
+                            excel_col = col_orig
+                            break
+                    if excel_col and excel_col in row:
+                        cell_val = row[excel_col]
+                        if (
+                            not pd.isna(cell_val)
+                            and normalize_value(cell_val) != "#n/c"
+                        ):
+                            parent_dict[tax_level] = str(cell_val).strip()
+                        else:
+                            parent_dict[tax_level] = None
+                    else:
+                        parent_dict[tax_level] = None
                 return {
                     "result_class": str(val).strip(),
                     "parents": taxon_lineage_map[val_norm],
+                    "parent_dict": parent_dict,
                 }
     return None
 
 
-def reorder_columns(df):
-    """Moves 'Refined' and 'Parent folders 1-6' next to the original Class column."""
-    original_cls_col = None
-    for col in df.columns:
-        c_lower = str(col).lower()
-        if (
-            "classification" in c_lower
-            and "class" in c_lower
-            and "refined" not in c_lower
-        ):
-            original_cls_col = col
-            break
-
-    if original_cls_col:
-        cols = list(df.columns)
-        cols_to_move = ["Classification class refined"] + [
-            f"Parent folder {i}" for i in range(1, 7)
-        ]
-        cols_to_move = [c for c in cols_to_move if c in cols]
-
-        for c in cols_to_move:
-            cols.remove(c)
-
-        insert_idx = cols.index(original_cls_col) + 1
-        for i, c in enumerate(cols_to_move):
-            cols.insert(insert_idx + i, c)
-        return df[cols]
-    return df
-
-
 def process_excel_file(
-    file_path: Path, rules_by_level: dict, class_lookup: dict, taxon_lineage_map: dict
+    file_path: Path,
+    rules_by_level: dict,
+    class_lookup: dict,
+    taxon_lineage_map: dict,
+    true_leaves: set,
 ) -> bool:
-    print(f"\n{'=' * 60}")
-    print(f"PROCESSING: {file_path.name}")
-    print(f"{'=' * 60}")
-
+    print(f"\n{'=' * 60}\nPROCESSING: {file_path.name}\n{'=' * 60}")
     try:
         try:
             df = pd.read_excel(file_path, sheet_name=TARGET_SHEET)
             print(f"  [OK] Sheet '{TARGET_SHEET}' loaded.")
         except ValueError:
-            print(
-                f"  [WARN] Sheet '{TARGET_SHEET}' not found. Using default sheet (0)."
-            )
             df = pd.read_excel(file_path, sheet_name=0)
-
-        # Remove ghost columns (Unnamed)
         df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
         initial_rows = len(df)
-
-        # Map Excel columns to Standard Taxonomy
         taxonomic_map = {}
         for col in df.columns:
             clean_col = str(col).strip()
@@ -198,125 +156,113 @@ def process_excel_file(
                 if clean_col.lower() == tax_level.lower():
                     taxonomic_map[col] = tax_level
                     break
-
-        # Check for Manual Assignment column
         manual_col_found = None
         for c in df.columns:
             if str(c).strip().lower() == MANUAL_COL_NAME.lower():
                 manual_col_found = c
                 break
-
         if manual_col_found:
-            print(f"  [OK] Manual assignment column found: '{manual_col_found}'")
-        else:
-            print(f"  [WARNING] Column '{MANUAL_COL_NAME}' not found.")
-
-        new_classes = []
-        new_parents = []
-
+            print(f"  [OK] Manual assignment: '{manual_col_found}'")
+        new_taxonomy = []
         print(f"  [INFO] Classifying {initial_rows} rows...")
-
         for idx, row in df.iterrows():
             cls_res = "#N/C"
-            parents = []
-
-            # 1. HIERARCHICAL SEARCH (Bottom-Up)
+            parent_dict = {}
             match = find_best_match_bottom_up(row, rules_by_level, taxonomic_map)
-
             if match:
                 cls_res = match["result_class"]
-                parents = match["parents"]
-
-            # 2. MANUAL ASSIGNMENT
+                parent_dict = match.get("parent_dict", {})
             if cls_res == "#N/C" and manual_col_found:
                 manual_val = row[manual_col_found]
                 norm_manual = normalize_value(manual_val)
-                is_valid = (
-                    norm_manual != "#n/c"
-                    and norm_manual != "0"
-                    and norm_manual != "nan"
-                )
-
-                if is_valid:
+                if norm_manual not in ["#n/c", "0", "nan"]:
                     cls_res = str(manual_val).strip()
                     if norm_manual in class_lookup:
-                        parents = class_lookup[norm_manual]
-                    else:
-                        parents = []
-
-            # 3. GENERIC FALLBACK
+                        lookup_data = class_lookup[norm_manual]
+                        parent_dict = (
+                            lookup_data.get("dict", {})
+                            if isinstance(lookup_data, dict)
+                            else {}
+                        )
             if cls_res == "#N/C":
                 fallback = find_taxonomic_fallback(
                     row, taxonomic_map, taxon_lineage_map
                 )
                 if fallback:
                     cls_res = fallback["result_class"]
-                    parents = fallback["parents"]
-
-            new_classes.append(cls_res)
-
-            row_parents = {}
-            for i in range(1, 7):
-                if i <= len(parents):
-                    val = parents[i - 1]
-                    # Clean up any remaining string artifacts
-                    if pd.isna(val) or str(val).strip().lower() in ["nan", "", "#n/c"]:
-                        val = pd.NA  # Use pandas NA for proper missing data handling
-                    else:
-                        val = str(val).strip()
+                    parent_dict = fallback.get("parent_dict", {})
+            is_true_leaf = cls_res in true_leaves if cls_res != "#N/C" else False
+            taxonomic_data = {"Leaf_reclass": cls_res if is_true_leaf else pd.NA}
+            for level_name in TAXONOMIC_HIERARCHY:
+                val = parent_dict.get(level_name, None)
+                if val and str(val).strip().lower() not in ["nan", "#n/c", ""]:
+                    taxonomic_data[f"{level_name}_reclass"] = str(val).strip()
                 else:
-                    val = pd.NA  # Use pandas NA instead of string "#N/C"
-                row_parents[f"Parent folder {i}"] = val
-            new_parents.append(row_parents)
+                    taxonomic_data[f"{level_name}_reclass"] = pd.NA
+            # CRITICAL: If cls_res is not a leaf but matches a taxonomic level, fill it
+            if not is_true_leaf and cls_res != "#N/C":
+                for level_name in TAXONOMIC_HIERARCHY:
+                    parent_val = parent_dict.get(level_name, None)
+                    if parent_val and normalize_value(parent_val) == normalize_value(
+                        cls_res
+                    ):
+                        taxonomic_data[f"{level_name}_reclass"] = cls_res
+                        break
+            new_taxonomy.append(taxonomic_data)
+        taxonomy_df = pd.DataFrame(new_taxonomy)
+        old_cols = [col for col in df.columns if "_reclass" in col]
+        if old_cols:
+            df = df.drop(columns=old_cols)
+        for col in taxonomy_df.columns:
+            df[col] = taxonomy_df[col]
+        print(f"  [INFO] Added: Leaf_reclass → Class_reclass")
 
-        # Assign new columns
-        df["Classification class refined"] = new_classes
-        parents_df = pd.DataFrame(new_parents)
-        for col in parents_df.columns:
-            df[col] = parents_df[col]
+        # Detailed classification statistics
+        print(f"\n  {'=' * 50}")
+        print(f"  CLASSIFICATION STATISTICS")
+        print(f"  {'=' * 50}")
 
-        # Reorder for visual clarity
-        df = reorder_columns(df)
+        # Count by most specific level achieved
+        levels_hierarchy = [
+            "Leaf_reclass",
+            "Family_reclass",
+            "Superfamily_reclass",
+            "Infraorder_reclass",
+            "Suborder_reclass",
+            "Order_reclass",
+            "Class_reclass",
+        ]
 
-        # Interactive Filtering
-        unclassified_mask = df["Classification class refined"] == "#N/C"
-        count_unclassified = unclassified_mask.sum()
+        for level in levels_hierarchy:
+            count = df[level].notna().sum()
+            if count > 0:
+                level_name = level.replace("_reclass", "")
+                print(f"    {count:4d} classified at {level_name} level")
+
+        # Find truly unclassified (no level at all)
+        all_empty = df[levels_hierarchy].isna().all(axis=1)
+        truly_unclassified = all_empty.sum()
+
+        print(f"  {'-' * 50}")
+        print(f"    {truly_unclassified:4d} unclassified (no taxonomic level)")
+        print(f"  {'=' * 50}\n")
+
+        # Only delete truly unclassified rows
         df_final = df
-
-        if count_unclassified > 0:
-            print(f"\n  {'!' * 40}")
-            print(f"  [RESULT] Found {count_unclassified} unclassified rows (#N/C).")
-
-            # Use config setting instead of interactive input
+        if truly_unclassified > 0:
             if config.DELETE_UNCLASSIFIED_ROWS:
-                df_final = df[~unclassified_mask]
-                print(
-                    f"  [AUTO] Deleted {count_unclassified} unclassified rows (config: DELETE_UNCLASSIFIED_ROWS = True)"
-                )
+                df_final = df[~all_empty]
+                print(f"  [AUTO] Deleted {truly_unclassified} truly unclassified rows")
             else:
-                print(
-                    f"  [AUTO] Kept {count_unclassified} unclassified rows (config: DELETE_UNCLASSIFIED_ROWS = False)"
-                )
-        else:
-            print(f"  [OK] All rows classified successfully.")
-
+                print(f"  [AUTO] Kept {truly_unclassified} truly unclassified rows")
         if df_final.empty:
-            print(f"  [WARNING] No rows remaining after filtering. Skipping file.")
             return False
-
-        # --- SAVE OUTPUT ---
-        # Save to HOME/reclass/filename.csv
         output_dir = Path(HOME) / OUTPUT_FOLDER_NAME
         output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Add version suffix to the output filename
-        base_name = file_path.stem  # filename without extension
-        output_name = output_dir / f"{base_name}_{config.VERSION_SUFFIX}.csv"
-
+        output_name = output_dir / f"{file_path.stem}_{config.VERSION_SUFFIX}.csv"
         df_final.to_csv(output_name, index=False, sep=";", encoding="utf-8-sig")
         print(f"  [SUCCESS] Saved to: {output_name}")
         return True
-
     except Exception as e:
         print(f"  [ERROR] {e}")
         import traceback
@@ -328,21 +274,10 @@ def process_excel_file(
 def main():
     script_dir = Path(HOME)
     ref_file = script_dir / MASTER_FILE
-
-    # --- PATH FIX: Use correct pathlib joining ---
     input_dir = script_dir / INPUT_FOLDER_NAME
-
-    if not ref_file.exists():
-        print(f"Error: Missing master file {MASTER_FILE}")
+    if not ref_file.exists() or not input_dir.exists():
+        print("Error: Missing files")
         return
-
-    # Check input directory exists
-    if not input_dir.exists():
-        print(f"Error: Source folder '{INPUT_FOLDER_NAME}' does not exist.")
-        print(f"Expected at: {input_dir}")
-        return
-
-    # Find Excel files
     excel_files = sorted(
         [
             f
@@ -350,24 +285,25 @@ def main():
             if f.suffix.lower() in [".xlsx", ".xls"] and not f.name.startswith("~$")
         ]
     )
-
     try:
         ref_df = pd.read_csv(ref_file)
+        true_leaves = set()
+        if config.MASTER_LEAF_COL in ref_df.columns:
+            true_leaves = set(
+                ref_df[config.MASTER_LEAF_COL].dropna().astype(str).str.strip()
+            )
+            print(f"[INFO] Loaded {len(true_leaves)} true leaves")
         rules_by_level, class_lookup, taxon_lineage_map = build_knowledge_base(ref_df)
     except Exception as e:
-        print(f"Error loading master file: {e}")
+        print(f"Error: {e}")
         return
-
     if not excel_files:
-        print(f"No Excel files found in {input_dir}")
         return
-
-    print(
-        f"Found {len(excel_files)} files in '{INPUT_FOLDER_NAME}'. Starting process..."
-    )
-
+    print(f"Found {len(excel_files)} files...")
     for f in excel_files:
-        process_excel_file(f, rules_by_level, class_lookup, taxon_lineage_map)
+        process_excel_file(
+            f, rules_by_level, class_lookup, taxon_lineage_map, true_leaves
+        )
 
 
 if __name__ == "__main__":
