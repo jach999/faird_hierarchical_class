@@ -96,6 +96,11 @@ def find_best_match_bottom_up(row, rules_by_level, taxonomic_map):
 
 
 def find_taxonomic_fallback(row, taxonomic_map, taxon_lineage_map):
+    """
+    Fallback: Find the deepest taxonomic level that exists in the master file.
+    CRITICAL: Only returns taxonomic values that exist in the master file.
+    Does NOT use arbitrary values from Excel columns.
+    """
     for level in TAXONOMIC_HIERARCHY:
         level_key = level.lower()
         col_name_in_excel = None
@@ -107,27 +112,33 @@ def find_taxonomic_fallback(row, taxonomic_map, taxon_lineage_map):
             val = row[col_name_in_excel]
             val_norm = normalize_value(val)
             if val_norm != "#n/c" and val_norm in taxon_lineage_map:
+                # CRITICAL FIX: Build parent_dict ONLY from master file lineage
+                # NOT from Excel column values which may not exist in master
                 parent_dict = {}
+                lineage = taxon_lineage_map[val_norm]
+
+                # The lineage contains validated parent taxa (most general first)
+                # Assign each to its correct level based on lineage depth
+                for i, parent in enumerate(lineage):
+                    level_idx = i
+                    if level_idx < len(TAXONOMIC_HIERARCHY):
+                        level_name = TAXONOMIC_HIERARCHY[-(level_idx + 1)]
+                        parent_dict[level_name] = parent
+
+                # Add the current taxon at its level
+                current_idx = len(lineage)
+                if current_idx < len(TAXONOMIC_HIERARCHY):
+                    level_name = TAXONOMIC_HIERARCHY[-(current_idx + 1)]
+                    parent_dict[level_name] = str(val).strip()
+
+                # Fill remaining levels with None
                 for tax_level in TAXONOMIC_HIERARCHY:
-                    excel_col = None
-                    for col_orig, col_std in taxonomic_map.items():
-                        if col_std.lower() == tax_level.lower():
-                            excel_col = col_orig
-                            break
-                    if excel_col and excel_col in row:
-                        cell_val = row[excel_col]
-                        if (
-                            not pd.isna(cell_val)
-                            and normalize_value(cell_val) != "#n/c"
-                        ):
-                            parent_dict[tax_level] = str(cell_val).strip()
-                        else:
-                            parent_dict[tax_level] = None
-                    else:
+                    if tax_level not in parent_dict:
                         parent_dict[tax_level] = None
+
                 return {
                     "result_class": str(val).strip(),
-                    "parents": taxon_lineage_map[val_norm],
+                    "parents": lineage,
                     "parent_dict": parent_dict,
                 }
     return None
@@ -215,7 +226,7 @@ def process_excel_file(
             df = df.drop(columns=old_cols)
         for col in taxonomy_df.columns:
             df[col] = taxonomy_df[col]
-        print(f"  [INFO] Added: Leaf_reclass → Class_reclass")
+        print(f"  [INFO] Added: Leaf_reclass â†’ Class_reclass")
 
         # Detailed classification statistics
         print(f"\n  {'=' * 50}")

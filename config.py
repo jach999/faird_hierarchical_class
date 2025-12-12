@@ -1,6 +1,6 @@
 # --- CONFIGURATION ---
 # ...
-MASTER_FILE = "ClassificationClasses_long.csv"
+MASTER_FILE = "ClassificationClasses_new.csv"
 MASTER_LEAF_COL = "Leaf"
 
 # --- RECLASSIFICATION OPTIONS ---

@@ -15,6 +15,9 @@ MASTER_FILE = config.MASTER_FILE  # The authority on what is a true leaf
 # Define the Leaf Column name in the input files
 LEAF_COLUMN = "Leaf_reclass"
 
+# Master file hierarchy columns (without _reclass suffix)
+MASTER_HIERARCHY = ["Class", "Order", "Suborder", "Infraorder", "Superfamily", "Family"]
+
 
 def is_valid_node(val) -> bool:
     """
@@ -43,29 +46,87 @@ def clean_label(value):
     return s
 
 
+def build_master_paths_map(master_path: Path) -> dict:
+    """
+    Builds a comprehensive map of ALL taxonomic nodes to their complete paths.
+    This ensures we use the master file's hierarchy, not the potentially incomplete
+    reclassified data.
+
+    Returns:
+        dict: {taxon_name: [path_from_root_to_taxon]}
+
+    Example:
+        "muscoid_fly": ["Insecta", "Diptera", "Brachycera", "Muscomorpha", "Muscoidea", "muscoid_fly"]
+        "Muscoidea": ["Insecta", "Diptera", "Brachycera", "Muscomorpha", "Muscoidea"]
+        "Muscomorpha": ["Insecta", "Diptera", "Brachycera", "Muscomorpha"]
+    """
+    if not master_path.exists():
+        print(f"[ERROR] Master file not found at {master_path}")
+        return {}
+
+    try:
+        master_df = pd.read_csv(master_path)
+        paths_map = {}
+
+        print(f"[INFO] Building master taxonomy paths map from {master_path.name}...")
+
+        for _, row in master_df.iterrows():
+            # Build the full path for this taxonomy line
+            full_path = []
+
+            # Add each level from general to specific
+            for level in MASTER_HIERARCHY:
+                if level in master_df.columns:
+                    val = row[level]
+                    if is_valid_node(val):
+                        full_path.append(str(val).strip())
+
+            # Add leaf if present
+            if config.MASTER_LEAF_COL in master_df.columns:
+                leaf = row[config.MASTER_LEAF_COL]
+                if is_valid_node(leaf):
+                    full_path.append(str(leaf).strip())
+
+            # Now store the path for each taxon in this lineage
+            # Example: if path is [A, B, C, D], store:
+            # A: [A]
+            # B: [A, B]
+            # C: [A, B, C]
+            # D: [A, B, C, D]
+            for i in range(len(full_path)):
+                taxon = full_path[i]
+                taxon_path = full_path[: i + 1]
+
+                # Only store if not already present (avoid overwrites)
+                # For convergent taxonomies (same common name, different parents),
+                # we keep the first occurrence
+                if taxon not in paths_map:
+                    paths_map[taxon] = taxon_path
+
+        print(f"  Built paths for {len(paths_map)} unique taxonomic nodes")
+        return paths_map
+
+    except Exception as e:
+        print(f"[ERROR] Failed to build master paths map: {e}")
+        return {}
+
+
 def load_master_leaves(master_path: Path) -> set:
     """
     Loads the Master Classification file to identify TRUE LEAVES.
-    This prevents intermediate nodes (like 'Diptera') from being colored yellow
-    just because they appear in the refined column due to fallback logic.
     """
     if not master_path.exists():
-        print(
-            f"[ERROR] Master file not found at {master_path}. Coloring might be inaccurate."
-        )
+        print(f"[ERROR] Master file not found at {master_path}")
         return set()
 
     try:
         df = pd.read_csv(master_path)
-        # We assume the column containing the leaf names is 'Classification Class'
-        # Adjust if your master file uses a different header
         target_col = config.MASTER_LEAF_COL
 
         if target_col not in df.columns:
             print(f"[ERROR] Column '{target_col}' not found in Master file.")
             return set()
 
-        # Extract unique values, strip whitespace, ignore nan
         leaves = set(df[target_col].dropna().astype(str).str.strip())
         print(f"[INFO] Loaded {len(leaves)} true leaf categories from Master file.")
         return leaves
@@ -80,7 +141,6 @@ def load_and_combine_data(input_path: Path) -> pd.DataFrame:
     Iterates through all CSV files in the input folder and combines them
     into a single DataFrame.
     """
-    # Only load CSV files that match the current version suffix
     all_files = sorted(
         [
             f
@@ -100,7 +160,6 @@ def load_and_combine_data(input_path: Path) -> pd.DataFrame:
     df_list = []
     for f in all_files:
         try:
-            # Note: We use sep=';' because the previous script saves with semicolons
             temp_df = pd.read_csv(f, sep=";", on_bad_lines="skip")
             df_list.append(temp_df)
             print(f"  - Loaded: {f.name} ({len(temp_df)} rows)")
@@ -118,13 +177,18 @@ def generate_graph(
     df: pd.DataFrame,
     output_path: Path,
     true_leaves: set,
+    master_paths_map: dict,
     mode: str = "endpoint",
     suffix: str = "",
 ):
     """
-    Generates the Graphviz tree from the DataFrame.
+    Generates the Graphviz tree from the DataFrame using master file paths.
+
+    CRITICAL FIX: Uses master_paths_map to construct complete hierarchical paths,
+    ensuring no levels are skipped even if they're NaN in the reclassified data.
 
     Args:
+        master_paths_map: dict mapping taxon names to their complete paths from master file
         mode: "endpoint" (counts only final classifications) or "cumulative" (counts all flow-through)
         suffix: suffix to add to output filename (e.g., "_cml")
     """
@@ -150,36 +214,58 @@ def generate_graph(
         print(f"[ERROR] Leaf column '{LEAF_COLUMN}' not found in data.")
         return
 
-    print(
-        f"  Using fixed hierarchy: Class → Order → Suborder → Infraorder → Superfamily → Family → Leaf"
-    )
+    print(f"  Using master file to reconstruct complete hierarchical paths")
 
     # 2. Build Paths and Count Occurrences
     node_counts = Counter()
-    node_cumulative_counts = Counter()  # NEW: For cumulative version
+    node_cumulative_counts = Counter()
     edges = set()
-
-    # We maintain a set of ALL nodes encountered to iterate later
     all_encountered_nodes = set()
 
+    # Track warnings
+    missing_taxa_warnings = set()
+
     for _, row in df.iterrows():
-        # Construct the path for this row
-        path_nodes = []
+        # CRITICAL FIX: Find the most specific classification for this row
+        # Check from most specific (Leaf) to most general (Class)
+        most_specific_taxon = None
 
-        # Add taxonomy levels from general to specific (Class -> Family)
-        for col in hierarchy_cols:
-            val = row[col]
-            if is_valid_node(val):
-                clean_val = str(val).strip()
-                path_nodes.append(clean_val)
-                all_encountered_nodes.add(clean_val)
+        # First check Leaf
+        if is_valid_node(row[LEAF_COLUMN]):
+            most_specific_taxon = str(row[LEAF_COLUMN]).strip()
+        else:
+            # Check hierarchy levels from most to least specific
+            for col in reversed(hierarchy_cols):
+                if is_valid_node(row[col]):
+                    most_specific_taxon = str(row[col]).strip()
+                    break
 
-        # Add Leaf (most specific classification)
-        leaf_val = row[LEAF_COLUMN]
-        if is_valid_node(leaf_val):
-            clean_leaf = str(leaf_val).strip()
-            path_nodes.append(clean_leaf)
-            all_encountered_nodes.add(clean_leaf)
+        if not most_specific_taxon:
+            continue  # Skip rows with no classification
+
+        # NEW: Look up the complete path from master file
+        if most_specific_taxon in master_paths_map:
+            path_nodes = master_paths_map[most_specific_taxon].copy()
+        else:
+            # Taxon not found in master - this shouldn't happen with correct reclassification
+            # But handle gracefully
+            if most_specific_taxon not in missing_taxa_warnings:
+                print(
+                    f"  [WARNING] Taxon '{most_specific_taxon}' not found in master file"
+                )
+                missing_taxa_warnings.add(most_specific_taxon)
+            # Fallback: use whatever values we have (old behavior)
+            path_nodes = []
+            for col in hierarchy_cols:
+                val = row[col]
+                if is_valid_node(val):
+                    path_nodes.append(str(val).strip())
+            if is_valid_node(row[LEAF_COLUMN]):
+                path_nodes.append(str(row[LEAF_COLUMN]).strip())
+
+        # Add all nodes in path to encountered set
+        for node in path_nodes:
+            all_encountered_nodes.add(node)
 
         # Update Counts and Edges
         if path_nodes:
@@ -196,9 +282,6 @@ def generate_graph(
                 parent = path_nodes[i]
                 child = path_nodes[i + 1]
                 edges.add((parent, child))
-
-                # OPTIONAL: If you want n=X to represent flow through parents too:
-                # node_counts[parent] += 1
 
     # 2.5. Collapse 1:1 parent-leaf relationships if enabled
     collapsed_nodes = {}  # Maps: parent -> combined_node_name
@@ -221,28 +304,23 @@ def generate_graph(
                 child_parents[child] = []
             child_parents[child].append(parent)
 
-        # Detect 1:1 relationships (parent has exactly 1 child AND child is a leaf)
-        # BUT: Don't collapse if multiple parents converge to the same child
+        # Detect 1:1 relationships
         for parent, children in parent_children.items():
             if len(children) == 1:
                 child = children[0]
-                # Check if this child is a leaf (true leaf from master file)
                 if child in true_leaves:
-                    # Check if this child has multiple parents (convergence)
                     num_parents = len(child_parents.get(child, []))
 
                     if num_parents > 1:
-                        # Multiple parents converge to this leaf - DON'T collapse
                         print(
                             f"  - Skipping: {parent} → {child} (converges with {num_parents - 1} other parent(s))"
                         )
                         continue
 
-                    # This is a true 1:1 alias relationship - safe to collapse
                     # Create combined label
                     if config.LABEL_FORMAT == "taxonomic_common":
                         combined_label = f"{parent} ({child})"
-                    else:  # common_taxonomic
+                    else:
                         combined_label = f"{child} ({parent})"
 
                     collapsed_nodes[parent] = combined_label
@@ -250,27 +328,21 @@ def generate_graph(
 
                     print(f"  - Collapsing: {parent} → {child} => {combined_label}")
 
-        # Rebuild edges, skipping collapsed nodes
+        # Rebuild edges
         new_edges = set()
         for parent, child in edges:
-            # Check if either node is being collapsed
             if parent in collapsed_nodes and child in collapsed_nodes:
-                # Both are part of the same collapsed pair - skip this edge
                 continue
             elif parent in collapsed_nodes:
-                # Parent is collapsed - use combined node
                 new_edges.add((collapsed_nodes[parent], child))
             elif child in collapsed_nodes:
-                # Child is collapsed - connect parent to combined node
                 new_edges.add((parent, collapsed_nodes[child]))
             else:
-                # Neither collapsed - keep original edge
                 new_edges.add((parent, child))
 
         collapsed_edges = new_edges
 
         # Update all_encountered_nodes
-        # Remove individual nodes that were collapsed and add combined nodes
         collapsed_set = set(collapsed_nodes.keys())
         all_encountered_nodes = (all_encountered_nodes - collapsed_set) | set(
             collapsed_nodes.values()
@@ -280,22 +352,18 @@ def generate_graph(
 
     # 3. Initialize Graph
     dot = graphviz.Digraph(comment="Taxonomy Tree")
-    dot.attr(rankdir="LR")  # Left to Right orientation
-    # Default style
+    dot.attr(rankdir="LR")
     dot.attr(
         "node", shape="folder", style="filled", fontname="Arial", fillcolor="white"
     )
 
-    # 4. Add Nodes with Coloring Logic (SORTED for deterministic layout)
+    # 4. Add Nodes
     for node in sorted(all_encountered_nodes):
-        # Check if this is a collapsed combined node
         is_collapsed = (
             node in collapsed_nodes.values() if config.COLLAPSE_LEAF_ALIAS else False
         )
 
-        # For collapsed nodes, sum counts from both original nodes
         if is_collapsed and config.COLLAPSE_LEAF_ALIAS:
-            # Find the original nodes that were collapsed into this one
             original_nodes = [k for k, v in collapsed_nodes.items() if v == node]
             if mode == "cumulative":
                 count = sum(
@@ -309,27 +377,22 @@ def generate_graph(
             else:
                 count = node_counts.get(node, 0)
 
-        # --- COLOR LOGIC ---
-        # Collapsed nodes or true leaves get yellow color
+        # COLOR LOGIC
         if is_collapsed or node in true_leaves:
-            fill_color = "#FFFF99"  # Light Yellow
-            shape = "note"  # Use 'note' shape for files/leaves
+            fill_color = "#FFFF99"
+            shape = "note"
         else:
-            fill_color = "white"  # White
-            shape = "folder"  # Use 'folder' shape for categories
+            fill_color = "white"
+            shape = "folder"
 
-        # Label
         label_text = clean_label(node)
-        # Optional: Add count if > 0
         if count > 0:
             label_text += f"\n(n={count})"
 
         dot.node(node, label=label_text, fillcolor=fill_color, shape=shape)
 
-    # 5. Add Edges (SORTED for deterministic layout)
-    for parent, child in sorted(
-        collapsed_edges
-    ):  # Use collapsed_edges instead of edges
+    # 5. Add Edges
+    for parent, child in sorted(collapsed_edges):
         dot.edge(parent, child, color="#555555")
 
     # 6. Save
@@ -341,9 +404,6 @@ def generate_graph(
         print(f"[SUCCESS] Graph saved successfully at: {output_file}.png")
     except Exception as e:
         print(f"[ERROR] Graphviz render failed: {e}")
-        print(
-            "Ensure Graphviz is installed on your system (not just the python library)."
-        )
 
 
 def main():
@@ -352,7 +412,7 @@ def main():
     output_path = script_dir / OUTPUT_FOLDER
     master_path = script_dir / MASTER_FILE
 
-    # Create output directory if it doesn't exist
+    # Create output directory
     output_path.mkdir(parents=True, exist_ok=True)
 
     print(f"--- TAXONOMY TREE GENERATOR ---")
@@ -360,30 +420,36 @@ def main():
     print(f"Output Folder: {output_path}")
     print(f"Master File:   {master_path}")
 
-    # 1. Load Master Leaves (Authority)
-    true_leaves = load_master_leaves(master_path)
-    if not true_leaves:
-        print(
-            "[WARNING] Proceeding without leaf validation (Coloring will be default)."
-        )
+    # 1. Build master paths map (CRITICAL!)
+    master_paths_map = build_master_paths_map(master_path)
+    if not master_paths_map:
+        print("[ERROR] Failed to build master paths map. Cannot continue.")
+        return
 
-    # 2. Load Data
+    # 2. Load Master Leaves (for coloring)
+    true_leaves = load_master_leaves(master_path)
+
+    # 3. Load Data
     df = load_and_combine_data(input_path)
 
     if df.empty:
         print("[ERROR] No data found to process. Exiting.")
         return
 
-    # 3. Generate Graphs (both versions)
+    # 4. Generate Graphs (both versions)
     print("\n" + "=" * 60)
     print("GENERATING ENDPOINT VERSION (counts only final classifications)")
     print("=" * 60)
-    generate_graph(df, output_path, true_leaves, mode="endpoint", suffix="")
+    generate_graph(
+        df, output_path, true_leaves, master_paths_map, mode="endpoint", suffix=""
+    )
 
     print("\n" + "=" * 60)
     print("GENERATING CUMULATIVE VERSION (counts all flow-through)")
     print("=" * 60)
-    generate_graph(df, output_path, true_leaves, mode="cumulative", suffix="_cml")
+    generate_graph(
+        df, output_path, true_leaves, master_paths_map, mode="cumulative", suffix="_cml"
+    )
 
 
 if __name__ == "__main__":
