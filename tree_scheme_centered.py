@@ -489,15 +489,48 @@ def generate_paper_style_graph(
 
     max_depth = max(node_depth.values()) if node_depth else 0
 
-    # Group nodes by depth
+    # Compute subtree sizes (number of descendants) for edge weighting
+    def get_subtree_size(node, memo):
+        if node in memo:
+            return memo[node]
+        children = children_map.get(node, [])
+        if not children:
+            memo[node] = 1
+            return 1
+        size = 1 + sum(get_subtree_size(c, memo) for c in children)
+        memo[node] = size
+        return size
+
+    subtree_memo = {}
+    for node in all_encountered_nodes:
+        get_subtree_size(node, subtree_memo)
+
+    # Group nodes by depth, ordered to center widest subtrees
     nodes_by_depth = {}
     for node, depth in node_depth.items():
         nodes_by_depth.setdefault(depth, []).append(node)
 
+    # Sort nodes within each level: place widest subtrees in the center
+    for depth in nodes_by_depth:
+        nodes = nodes_by_depth[depth]
+        # Sort by subtree size descending
+        nodes_sorted = sorted(nodes, key=lambda n: subtree_memo.get(n, 0), reverse=True)
+        # Interleave: largest in middle, then alternating left/right
+        centered = []
+        left = []
+        right = []
+        for i, n in enumerate(nodes_sorted):
+            if i % 2 == 0:
+                right.append(n)
+            else:
+                left.append(n)
+        centered = left[::-1] + right
+        nodes_by_depth[depth] = centered
+
     # 4. Initialize Graph (Top to Bottom)
     dot = graphviz.Digraph(comment="Taxonomy Tree (Paper Style)")
     dot.attr(rankdir="TB")
-    dot.attr("graph", ranksep="0.8", nodesep="0.4")
+    dot.attr("graph", ranksep="0.8", nodesep="0.4", ordering="out")
     dot.attr(
         "node",
         shape="box",
@@ -535,7 +568,8 @@ def generate_paper_style_graph(
             s.attr(rank="same")
             # Include the level label in this rank group
             s.node(f"__level_{depth}")
-            for node in sorted(nodes_by_depth[depth]):
+            # Nodes are already ordered for centering
+            for node in nodes_by_depth[depth]:
                 s.node(node)
 
     # 7. Add Nodes with styling and counts
@@ -574,9 +608,31 @@ def generate_paper_style_graph(
 
         dot.node(node, label=label_text, fillcolor=fill_color, shape=shape, style=style)
 
-    # 8. Add Edges
-    for parent, child in sorted(collapsed_edges):
-        dot.edge(parent, child, color="#555555")
+    # 8. Add Edges (ordered per parent: widest subtrees in center)
+    # Group edges by parent
+    edges_by_parent = {}
+    for parent, child in collapsed_edges:
+        edges_by_parent.setdefault(parent, []).append(child)
+
+    for parent in sorted(edges_by_parent.keys()):
+        children = edges_by_parent[parent]
+        # Sort by subtree size descending
+        children_sorted = sorted(
+            children, key=lambda c: subtree_memo.get(c, 0), reverse=True
+        )
+        # Interleave: largest in center
+        left = []
+        right = []
+        for i, c in enumerate(children_sorted):
+            if i % 2 == 0:
+                right.append(c)
+            else:
+                left.append(c)
+        centered_children = left[::-1] + right
+
+        for child in centered_children:
+            weight = subtree_memo.get(child, 1)
+            dot.edge(parent, child, color="#555555", weight=str(weight))
 
     # 9. Save
     output_file = output_path / f"{OUTPUT_FILENAME}{suffix}"

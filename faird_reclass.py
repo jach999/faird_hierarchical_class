@@ -115,9 +115,11 @@ def find_taxonomic_fallback(row, taxonomic_map, taxon_lineage_map):
                 # CRITICAL FIX: Build parent_dict ONLY from master file lineage
                 # NOT from Excel column values which may not exist in master
                 parent_dict = {}
-                lineage = taxon_lineage_map[val_norm]
+                # Reverse lineage: taxon_lineage_map stores specific→general,
+                # but we need general→specific for correct level assignment
+                lineage = list(reversed(taxon_lineage_map[val_norm]))
 
-                # The lineage contains validated parent taxa (most general first)
+                # The lineage now contains validated parent taxa (most general first)
                 # Assign each to its correct level based on lineage depth
                 for i, parent in enumerate(lineage):
                     level_idx = i
