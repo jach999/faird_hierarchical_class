@@ -57,7 +57,7 @@ def build_knowledge_base(ref_df):
         full_parents_reversed = full_path[::-1]
 
         rule_obj = {
-            "result_class": row[config.MASTER_LEAF_COL],
+            "result_class": config.get_effective_leaf(row),
             "parents": full_parents_reversed,
             "parent_dict": parent_dict,
         }
@@ -65,7 +65,7 @@ def build_knowledge_base(ref_df):
         if deepest_level and deepest_value:
             rules_by_level[deepest_level][deepest_value] = rule_obj
 
-        cls_key = normalize_value(row[config.MASTER_LEAF_COL])
+        cls_key = normalize_value(config.get_effective_leaf(row) or "")
         if cls_key != "#n/c":
             class_lookup[cls_key] = {"list": full_parents_reversed, "dict": parent_dict}
 
@@ -228,7 +228,7 @@ def process_excel_file(
             df = df.drop(columns=old_cols)
         for col in taxonomy_df.columns:
             df[col] = taxonomy_df[col]
-        print(f"  [INFO] Added: Leaf_reclass â†’ Class_reclass")
+        print(f"  [INFO] Added: Leaf_reclass → Class_reclass")
 
         # Detailed classification statistics
         print(f"\n  {'=' * 50}")
@@ -301,11 +301,11 @@ def main():
     try:
         ref_df = pd.read_csv(ref_file)
         true_leaves = set()
-        if config.MASTER_LEAF_COL in ref_df.columns:
-            true_leaves = set(
-                ref_df[config.MASTER_LEAF_COL].dropna().astype(str).str.strip()
-            )
-            print(f"[INFO] Loaded {len(true_leaves)} true leaves")
+        for _, row in ref_df.iterrows():
+            leaf = config.get_effective_leaf(row)
+            if leaf:
+                true_leaves.add(leaf)
+        print(f"[INFO] Loaded {len(true_leaves)} true leaves")
         rules_by_level, class_lookup, taxon_lineage_map = build_knowledge_base(ref_df)
     except Exception as e:
         print(f"Error: {e}")

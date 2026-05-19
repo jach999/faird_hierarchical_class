@@ -1,4 +1,4 @@
-name: reclass_env
+name: scheme_env
 channels:
   - conda-forge
   - defaults

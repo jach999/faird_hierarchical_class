@@ -48,6 +48,9 @@ def load_master_leaves(master_path: Path) -> set:
     Loads the Master Classification file to identify TRUE LEAVES.
     This prevents intermediate nodes (like 'Diptera') from being colored yellow
     just because they appear in the refined column due to fallback logic.
+
+    Flexible: if Leaf column is empty for a row, the deepest taxonomic
+    column is used as the effective leaf (via config.get_effective_leaf).
     """
     if not master_path.exists():
         print(
@@ -57,16 +60,21 @@ def load_master_leaves(master_path: Path) -> set:
 
     try:
         df = pd.read_csv(master_path)
-        # We assume the column containing the leaf names is 'Classification Class'
-        # Adjust if your master file uses a different header
-        target_col = config.MASTER_LEAF_COL
 
-        if target_col not in df.columns:
-            print(f"[ERROR] Column '{target_col}' not found in Master file.")
-            return set()
+        # Use get_effective_leaf to handle both proxy and Latin-only modes
+        leaves = set()
+        for _, row in df.iterrows():
+            leaf = config.get_effective_leaf(row)
+            if leaf:
+                leaves.add(leaf)
 
-        # Extract unique values, strip whitespace, ignore nan
-        leaves = set(df[target_col].dropna().astype(str).str.strip())
+        # Auto-detect leaf mode and adjust COLLAPSE_LEAF_ALIAS
+        if not config.has_leaf_proxies(df):
+            config.COLLAPSE_LEAF_ALIAS = False
+            print(
+                f"[INFO] No leaf proxies detected. COLLAPSE_LEAF_ALIAS auto-disabled."
+            )
+
         print(f"[INFO] Loaded {len(leaves)} true leaf categories from Master file.")
         return leaves
 
@@ -151,7 +159,7 @@ def generate_graph(
         return
 
     print(
-        f"  Using fixed hierarchy: Class â†’ Order â†’ Suborder â†’ Infraorder â†’ Superfamily â†’ Family â†’ Leaf"
+        f"  Using fixed hierarchy: Class → Order → Suborder → Infraorder → Superfamily → Family → Leaf"
     )
 
     # 2. Build Paths and Count Occurrences
@@ -175,11 +183,13 @@ def generate_graph(
                 all_encountered_nodes.add(clean_val)
 
         # Add Leaf (most specific classification)
+        # Skip if leaf duplicates the last taxonomic node (Latin-only mode)
         leaf_val = row[LEAF_COLUMN]
         if is_valid_node(leaf_val):
             clean_leaf = str(leaf_val).strip()
-            path_nodes.append(clean_leaf)
-            all_encountered_nodes.add(clean_leaf)
+            if not path_nodes or clean_leaf != path_nodes[-1]:
+                path_nodes.append(clean_leaf)
+                all_encountered_nodes.add(clean_leaf)
 
         # Update Counts and Edges
         if path_nodes:
@@ -234,7 +244,7 @@ def generate_graph(
                     if num_parents > 1:
                         # Multiple parents converge to this leaf - DON'T collapse
                         print(
-                            f"  - Skipping: {parent} â†’ {child} (converges with {num_parents - 1} other parent(s))"
+                            f"  - Skipping: {parent} → {child} (converges with {num_parents - 1} other parent(s))"
                         )
                         continue
 
@@ -248,7 +258,7 @@ def generate_graph(
                     collapsed_nodes[parent] = combined_label
                     collapsed_nodes[child] = combined_label
 
-                    print(f"  - Collapsing: {parent} â†’ {child} => {combined_label}")
+                    print(f"  - Collapsing: {parent} → {child} => {combined_label}")
 
         # Rebuild edges, skipping collapsed nodes
         new_edges = set()
@@ -320,8 +330,8 @@ def generate_graph(
 
         # Label
         label_text = clean_label(node)
-        # Optional: Add count if > 0
-        if count > 0:
+        # Optional: Add count if enabled and > 0
+        if config.SHOW_COUNTS and count > 0:
             label_text += f"\n(n={count})"
 
         dot.node(node, label=label_text, fillcolor=fill_color, shape=shape)
@@ -395,8 +405,9 @@ def generate_paper_style_graph(
         leaf_val = row[LEAF_COLUMN]
         if is_valid_node(leaf_val):
             clean_leaf = str(leaf_val).strip()
-            path_nodes.append(clean_leaf)
-            all_encountered_nodes.add(clean_leaf)
+            if not path_nodes or clean_leaf != path_nodes[-1]:
+                path_nodes.append(clean_leaf)
+                all_encountered_nodes.add(clean_leaf)
 
         if path_nodes:
             endpoint = path_nodes[-1]
@@ -494,10 +505,46 @@ def generate_paper_style_graph(
     for node, depth in node_depth.items():
         nodes_by_depth.setdefault(depth, []).append(node)
 
+    # Compute subtree sizes and center-order nodes if CENTERED is enabled
+    subtree_memo = {}
+    if config.CENTERED:
+
+        def get_subtree_size(node, memo):
+            if node in memo:
+                return memo[node]
+            children = children_map.get(node, [])
+            if not children:
+                memo[node] = 1
+                return 1
+            size = 1 + sum(get_subtree_size(c, memo) for c in children)
+            memo[node] = size
+            return size
+
+        for node in all_encountered_nodes:
+            get_subtree_size(node, subtree_memo)
+
+        # Sort nodes within each level: place widest subtrees in the center
+        for depth in nodes_by_depth:
+            nodes = nodes_by_depth[depth]
+            nodes_sorted = sorted(
+                nodes, key=lambda n: subtree_memo.get(n, 0), reverse=True
+            )
+            left = []
+            right = []
+            for i, n in enumerate(nodes_sorted):
+                if i % 2 == 0:
+                    right.append(n)
+                else:
+                    left.append(n)
+            nodes_by_depth[depth] = left[::-1] + right
+
     # 4. Initialize Graph (Top to Bottom)
     dot = graphviz.Digraph(comment="Taxonomy Tree (Paper Style)")
     dot.attr(rankdir="TB")
-    dot.attr("graph", ranksep="0.8", nodesep="0.4")
+    graph_attrs = {"ranksep": "0.8", "nodesep": "0.4"}
+    if config.CENTERED:
+        graph_attrs["ordering"] = "out"
+    dot.attr("graph", **graph_attrs)
     dot.attr(
         "node",
         shape="box",
@@ -535,7 +582,13 @@ def generate_paper_style_graph(
             s.attr(rank="same")
             # Include the level label in this rank group
             s.node(f"__level_{depth}")
-            for node in sorted(nodes_by_depth[depth]):
+            # Use pre-computed order if centered, otherwise sorted
+            node_order = (
+                nodes_by_depth[depth]
+                if config.CENTERED
+                else sorted(nodes_by_depth[depth])
+            )
+            for node in node_order:
                 s.node(node)
 
     # 7. Add Nodes with styling and counts
@@ -569,14 +622,38 @@ def generate_paper_style_graph(
             style = "filled,rounded"
 
         label_text = clean_label(node)
-        if count > 0:
+        if config.SHOW_COUNTS and count > 0:
             label_text += f"\n(n={count})"
 
         dot.node(node, label=label_text, fillcolor=fill_color, shape=shape, style=style)
 
     # 8. Add Edges
-    for parent, child in sorted(collapsed_edges):
-        dot.edge(parent, child, color="#555555")
+    if config.CENTERED:
+        # Order edges per parent: widest subtrees in center, with weight
+        edges_by_parent = {}
+        for parent, child in collapsed_edges:
+            edges_by_parent.setdefault(parent, []).append(child)
+
+        for parent in sorted(edges_by_parent.keys()):
+            children = edges_by_parent[parent]
+            children_sorted = sorted(
+                children, key=lambda c: subtree_memo.get(c, 0), reverse=True
+            )
+            left = []
+            right = []
+            for i, c in enumerate(children_sorted):
+                if i % 2 == 0:
+                    right.append(c)
+                else:
+                    left.append(c)
+            centered_children = left[::-1] + right
+
+            for child in centered_children:
+                weight = subtree_memo.get(child, 1)
+                dot.edge(parent, child, color="#555555", weight=str(weight))
+    else:
+        for parent, child in sorted(collapsed_edges):
+            dot.edge(parent, child, color="#555555")
 
     # 9. Save
     output_file = output_path / f"{OUTPUT_FILENAME}{suffix}"
@@ -620,16 +697,17 @@ def main():
         print("[ERROR] No data found to process. Exiting.")
         return
 
-    # 3. Generate Graphs (both versions)
+    # 3. Generate Graphs
     print("\n" + "=" * 60)
     print("GENERATING ENDPOINT VERSION (counts only final classifications)")
     print("=" * 60)
     generate_graph(df, output_path, true_leaves, mode="endpoint", suffix="")
 
-    print("\n" + "=" * 60)
-    print("GENERATING CUMULATIVE VERSION (counts all flow-through)")
-    print("=" * 60)
-    generate_graph(df, output_path, true_leaves, mode="cumulative", suffix="_cml")
+    if config.SHOW_COUNTS:
+        print("\n" + "=" * 60)
+        print("GENERATING CUMULATIVE VERSION (counts all flow-through)")
+        print("=" * 60)
+        generate_graph(df, output_path, true_leaves, mode="cumulative", suffix="_cml")
 
     print("\n" + "=" * 60)
     print("GENERATING PAPER-STYLE VERSION (top-to-bottom with levels)")

@@ -75,7 +75,10 @@ def load_master_taxonomy():
         for col in tax_cols:
             val = row[col]
             if pd.notna(val) and str(val).strip():
-                path.append(str(val).strip())
+                clean_val = str(val).strip()
+                # Skip duplicate (Latin-only mode: Leaf == last taxonomic node)
+                if not path or clean_val != path[-1]:
+                    path.append(clean_val)
         all_paths.append(path)
 
         node = tree
@@ -198,7 +201,10 @@ def extract_hierarchy_labels(row, num_levels):
         if col in row.index:
             val = row[col]
             if pd.notna(val) and str(val).strip():
-                path_values.append(str(val).strip())
+                clean_val = str(val).strip()
+                # Skip duplicate (Latin-only mode: Leaf == last taxonomic node)
+                if not path_values or clean_val != path_values[-1]:
+                    path_values.append(clean_val)
 
     labels = {}
     for i in range(num_levels):
